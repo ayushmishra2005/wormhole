@@ -111,8 +111,6 @@ export class NodeWallet {
  * 2. Sign using {@param signTransaction}.
  * 3. Send raw transaction.
  * 4. Confirm transaction.
- *
- * Do not pass a partially signed transaction.
  */
 export async function signSendAndConfirmTransaction(
   connection: Connection,
