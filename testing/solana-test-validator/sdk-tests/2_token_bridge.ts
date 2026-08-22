@@ -2313,7 +2313,7 @@ describe("Token Bridge", () => {
         const amount = 6969696969n;
         const targetAddress = Buffer.alloc(32, "deadbeef", "hex");
 
-        const transferNativeSolTx = await transferNativeSol(
+        const transaction = await transferNativeSol(
           connection,
           CORE_BRIDGE_ADDRESS,
           TOKEN_BRIDGE_ADDRESS,
@@ -2321,17 +2321,11 @@ describe("Token Bridge", () => {
           amount,
           targetAddress,
           "ethereum"
-        )
-          .then((transaction) =>
-            signSendAndConfirmTransaction(
-              connection,
-              wallet.key(),
-              wallet.signTransaction,
-              transaction
-            )
-          )
-          .then((response) => response.signature);
-        //console.log(`transferNativeSolTx: ${transferNativeSolTx}`);
+        );
+        transaction.partialSign(wallet.signer());
+        await connection
+          .sendRawTransaction(transaction.serialize())
+          .then((signature) => connection.confirmTransaction(signature));
 
         const balanceAfter = await connection
           .getBalance(wallet.key())

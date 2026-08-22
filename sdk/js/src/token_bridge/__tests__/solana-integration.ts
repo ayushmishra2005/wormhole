@@ -381,6 +381,29 @@ describe("Solana to Ethereum", () => {
           tryNativeToUint8Array(targetAddress, CHAIN_ID_ETH),
           CHAIN_ID_ETH
         );
+        const wrappedSol = transaction.instructions[0].keys[1].pubkey;
+        const message = transaction.instructions[4].keys.find(
+          (k) =>
+            k.isSigner &&
+            !k.pubkey.equals(keypair.publicKey) &&
+            !k.pubkey.equals(wrappedSol)
+        )?.pubkey;
+        expect(message).toBeDefined();
+        expect(transaction.signatures.length).toBe(3);
+        const payerEntry = transaction.signatures.find((s) =>
+          s.publicKey.equals(keypair.publicKey)
+        );
+        const wrappedSolEntry = transaction.signatures.find((s) =>
+          s.publicKey.equals(wrappedSol)
+        );
+        const messageEntry = transaction.signatures.find((s) =>
+          s.publicKey.equals(message!)
+        );
+        expect(payerEntry).toBeDefined();
+        expect(payerEntry!.signature).toBeNull();
+        expect(wrappedSolEntry?.signature).toBeTruthy();
+        expect(messageEntry?.signature).toBeTruthy();
+        expect(transaction.verifySignatures(false)).toBe(true);
         // sign, send, and confirm transaction
         transaction.partialSign(keypair);
         const txid = await connection.sendRawTransaction(

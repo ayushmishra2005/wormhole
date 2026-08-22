@@ -357,6 +357,13 @@ export function transferFromXpla(
       ];
 }
 
+/**
+ * Transfers native SOL through the Token Bridge.
+ *
+ * The returned transaction is already signed by the generated message and
+ * temporary wrapped-SOL accounts. Add the payer signature without rebuilding
+ * or changing the transaction.
+ */
 export async function transferNativeSol(
   connection: Connection,
   bridgeAddress: PublicKeyInitData,

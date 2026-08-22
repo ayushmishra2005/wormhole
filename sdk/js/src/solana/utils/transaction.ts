@@ -105,12 +105,14 @@ export class NodeWallet {
 }
 
 /**
- * The transactions provided to this function should be ready to send.
+ * Expects an unsigned {@link Transaction}.
  * This function will do the following:
  * 1. Add the {@param payer} as the feePayer and latest blockhash to the {@link Transaction}.
  * 2. Sign using {@param signTransaction}.
  * 3. Send raw transaction.
  * 4. Confirm transaction.
+ *
+ * Do not pass a partially signed transaction.
  */
 export async function signSendAndConfirmTransaction(
   connection: Connection,
