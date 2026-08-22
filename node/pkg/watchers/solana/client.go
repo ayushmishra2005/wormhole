@@ -761,7 +761,7 @@ func (s *SolanaWatcher) processTransaction(ctx context.Context, rpcClient *rpc.C
 	}
 
 	signature := tx.Signatures[0]
-	err := s.populateLookupTableAccounts(ctx, rpcClient, tx)
+	err := s.populateLookupTableAccounts(ctx, rpcClient, tx, meta)
 	if err != nil {
 		s.logger.Error("failed to fetch lookup table accounts for transaction",
 			zap.Uint64("slot", slot),
@@ -1313,14 +1313,26 @@ func ParseMessagePublicationAccount(
 	return prop, nil
 }
 
-func (s *SolanaWatcher) populateLookupTableAccounts(ctx context.Context, rpcClient *rpc.Client, tx *solana.Transaction) error {
+func (s *SolanaWatcher) populateLookupTableAccounts(ctx context.Context, rpcClient *rpc.Client, tx *solana.Transaction, meta *rpc.TransactionMeta) error {
 	if !tx.Message.IsVersioned() {
 		return nil
 	}
 
-	tblKeys := tx.Message.GetAddressTableLookups().GetTableIDs()
+	lookups := tx.Message.GetAddressTableLookups()
+	tblKeys := lookups.GetTableIDs()
 	if len(tblKeys) == 0 {
 		return nil
+	}
+
+	if meta != nil {
+		writable := meta.LoadedAddresses.Writable
+		readonly := meta.LoadedAddresses.ReadOnly
+		if len(writable)+len(readonly) == lookups.NumLookups() {
+			// Loaded addresses remain available after the lookup table is closed.
+			tx.Message.AccountKeys = append(tx.Message.AccountKeys, writable...)
+			tx.Message.AccountKeys = append(tx.Message.AccountKeys, readonly...)
+			return nil
+		}
 	}
 
 	resolutions := make(map[solana.PublicKey]solana.PublicKeySlice)

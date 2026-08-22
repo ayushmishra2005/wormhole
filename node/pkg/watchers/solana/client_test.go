@@ -1107,6 +1107,100 @@ func TestProcessTransaction(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessTransactionLookupTables(t *testing.T) {
+	contract := solana.PublicKeyFromBytes(bytes.Repeat([]byte{0xAA}, solana.PublicKeyLength))
+	messageAccount := solana.PublicKeyFromBytes(bytes.Repeat([]byte{0xBB}, solana.PublicKeyLength))
+	otherKey := solana.PublicKeyFromBytes(bytes.Repeat([]byte{0xCC}, solana.PublicKeyLength))
+	tableAddr := solana.PublicKeyFromBytes(bytes.Repeat([]byte{0x01}, solana.PublicKeyLength))
+
+	proposal := testMessagePublicationAccount([]byte("hello"), 32)
+	accountData := encodeMessagePublicationAccount(t, accountPrefixReliable, proposal)
+	postMsgData := encodePostMessageData(t, 7, []byte("hello"), consistencyLevelFinalized)
+
+	// static [otherKey] + writable [contract] + readonly [messageAccount]
+	matchingInstruction := solana.CompiledInstruction{
+		ProgramIDIndex: 1,
+		Data:           append([]byte{postMessageInstructionID}, postMsgData...),
+		Accounts:       []uint16{0, 2, 0, 0, 0, 0, 0, 0},
+	}
+
+	tests := []struct {
+		name             string
+		registerTable    bool
+		loaded           rpc.LoadedAddresses
+		wantObservations uint32
+	}{
+		{
+			name:          "deleted_table_uses_loaded_addresses",
+			registerTable: false,
+			loaded: rpc.LoadedAddresses{
+				Writable: []solana.PublicKey{contract},
+				ReadOnly: []solana.PublicKey{messageAccount},
+			},
+			wantObservations: 1,
+		},
+		{
+			name:             "empty_loaded_addresses_falls_back_to_rpc",
+			registerTable:    true,
+			loaded:           rpc.LoadedAddresses{},
+			wantObservations: 1,
+		},
+		{
+			name:          "incomplete_loaded_addresses_falls_back_to_rpc",
+			registerTable: true,
+			loaded: rpc.LoadedAddresses{
+				Writable: []solana.PublicKey{contract},
+			},
+			wantObservations: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msgC := make(chan *common.MessagePublication, 10)
+			s := newTestWatcher(t, vaa.ChainIDSolana, rpc.CommitmentFinalized, msgC)
+			s.errC = make(chan error, 10)
+			s.contract = contract
+
+			m := newMockRPCServer(t)
+			defer m.Close()
+			m.SetAccount(messageAccount, contract.String(), accountData)
+			if tc.registerTable {
+				m.SetLookupTable(tableAddr, []solana.PublicKey{contract, messageAccount})
+			}
+
+			tx := &solana.Transaction{
+				Message: solana.Message{
+					AccountKeys:  []solana.PublicKey{otherKey},
+					Instructions: []solana.CompiledInstruction{matchingInstruction},
+				},
+				Signatures: []solana.Signature{{}},
+			}
+			tx.Message.SetAddressTableLookups([]solana.MessageAddressTableLookup{{
+				AccountKey:      tableAddr,
+				WritableIndexes: []uint8{0},
+				ReadonlyIndexes: []uint8{1},
+			}})
+
+			meta := &rpc.TransactionMeta{LoadedAddresses: tc.loaded}
+			num := s.processTransaction(context.Background(), rpc.New(m.URL), tx, meta, 42, false)
+			assert.Equal(t, tc.wantObservations, num)
+
+			if tc.wantObservations > 0 {
+				for i := uint32(0); i < tc.wantObservations; i++ {
+					select {
+					case msg := <-msgC:
+						require.NotNil(t, msg)
+					case <-time.After(2 * time.Second):
+						t.Fatalf("timed out waiting for message %d", i)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestNewMessageAccountData(t *testing.T) {
 	tests := []struct {
 		name string // description of this test case
@@ -1326,6 +1420,7 @@ func TestPopulateLookupTableAccounts(t *testing.T) {
 		staticKeys []solana.PublicKey
 		tables     []tableSpec
 		lookups    []lookupSpec
+		loaded     rpc.LoadedAddresses
 		wantKeys   []solana.PublicKey // expected AccountKeys after resolution; ignored when wantErrSub != ""
 		wantErrSub string             // when non-empty, expect an error containing this substring
 	}{
@@ -1387,6 +1482,44 @@ func TestPopulateLookupTableAccounts(t *testing.T) {
 			lookups:    []lookupSpec{{tableAddr: tableAAddr, readonly: []uint8{0}}},
 			wantErrSub: "failed to get account info",
 		},
+		{
+			name:       "loaded addresses used when table is missing",
+			staticKeys: []solana.PublicKey{staticAddr},
+			tables:     nil,
+			lookups:    []lookupSpec{{tableAddr: tableAAddr, writable: []uint8{1}, readonly: []uint8{2}}},
+			loaded:     rpc.LoadedAddresses{Writable: []solana.PublicKey{entry1}, ReadOnly: []solana.PublicKey{entry2}},
+			wantKeys:   []solana.PublicKey{staticAddr, entry1, entry2},
+		},
+		{
+			name:       "empty loaded addresses falls back to rpc",
+			staticKeys: []solana.PublicKey{staticAddr},
+			tables:     []tableSpec{{addr: tableAAddr, entries: []solana.PublicKey{entry0, entry1, entry2, entry3}}},
+			lookups:    []lookupSpec{{tableAddr: tableAAddr, writable: []uint8{1}, readonly: []uint8{2}}},
+			loaded:     rpc.LoadedAddresses{},
+			wantKeys:   []solana.PublicKey{staticAddr, entry1, entry2},
+		},
+		{
+			name:       "incomplete loaded addresses falls back to rpc",
+			staticKeys: []solana.PublicKey{staticAddr},
+			tables:     []tableSpec{{addr: tableAAddr, entries: []solana.PublicKey{entry0, entry1, entry2, entry3}}},
+			lookups:    []lookupSpec{{tableAddr: tableAAddr, writable: []uint8{1}, readonly: []uint8{2}}},
+			loaded:     rpc.LoadedAddresses{Writable: []solana.PublicKey{entry1}},
+			wantKeys:   []solana.PublicKey{staticAddr, entry1, entry2},
+		},
+		{
+			name:       "loaded addresses writable then readonly",
+			staticKeys: []solana.PublicKey{staticAddr},
+			tables:     nil,
+			lookups: []lookupSpec{
+				{tableAddr: tableAAddr, writable: []uint8{1}, readonly: []uint8{2}},
+				{tableAddr: tableBAddr, writable: []uint8{2}, readonly: []uint8{0}},
+			},
+			loaded: rpc.LoadedAddresses{
+				Writable: []solana.PublicKey{entry1, entry6},
+				ReadOnly: []solana.PublicKey{entry2, entry4},
+			},
+			wantKeys: []solana.PublicKey{staticAddr, entry1, entry6, entry2, entry4},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1418,7 +1551,7 @@ func TestPopulateLookupTableAccounts(t *testing.T) {
 			tx.Message.SetAddressTableLookups(lookups)
 
 			s := newTestWatcher(t, vaa.ChainIDSolana, rpc.CommitmentFinalized, nil)
-			err := s.populateLookupTableAccounts(context.Background(), rpc.New(m.URL), tx)
+			err := s.populateLookupTableAccounts(context.Background(), rpc.New(m.URL), tx, &rpc.TransactionMeta{LoadedAddresses: tc.loaded})
 
 			if tc.wantErrSub != "" {
 				require.ErrorContains(t, err, tc.wantErrSub)
